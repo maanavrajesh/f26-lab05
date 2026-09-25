@@ -107,28 +107,65 @@ $120.00.
 
 ## Milestone 3: Two proposals and one false positive
 
-One proposal for each milestone 1 smell you did not fix.
+### Proposal A (not coded) — the half-wired cache
 
-### Proposal A (not coded)
+**The problem.** Smell 2. `ReservationManager.listBookingsForRoom` reads through `QueryCache` but
+nothing ever writes to it, and the layer cannot be completed where it sits: reads happen in the
+manager while writes happen in `StorageProvider`, so no single class is in a position to keep the two
+consistent. That is why the missing `set()` is a trap rather than a one-line fix.
 
-**The problem.** Name it.
+**The decomposition.** Remove the cache from `ReservationManager` — it goes back to not knowing a
+cache exists. If caching is actually needed later, add a `CachingStorageProvider implements
+StorageProvider` that wraps another provider. It owns both halves: it caches `findByRoom` / `findAll`
+and invalidates on the `save` / `update` calls that flow through the same object. Reads and their
+invalidation live in one class, and the cache becomes a composition choice at construction
+(`new ReservationManager(new CachingStorageProvider(new InMemoryStorageProvider()))`) rather than a
+hidden field. `QueryCache` stays as the plain expiry map it already is; `cacheConfig` keeps the knobs.
 
-**The decomposition.** What are the pieces, what does each own, and where do the rules live?
+**One cost.** The decorator can only key on storage-level queries, not on the higher-level results
+callers actually repeat — `formatDailySummary` still recomputes its rows and totals on every call. It
+also makes the defensive copying in `InMemoryStorageProvider` load-bearing in a new way: a decorator
+that hands out its cached array directly reintroduces exactly the aliasing bugs the current provider
+copies to avoid, so the wrapper has to copy on every hit and gives back part of what caching bought.
 
-**One cost.** Something this actually costs. "No real downside" is not a cost.
+### Proposal B (not coded) — presentation inside the domain class
 
-### Proposal B (not coded)
+**The problem.** Smell 3. Clock and currency formatting sit in the class that owns the booking
+lifecycle, and two things that are not display depend on them: the text of `BookingError` and the body
+of every notification.
 
-**The problem.**
+**The decomposition.** A `receipts.ts` module of pure functions — `formatClock`, `formatMoney`,
+`formatReceipt(booking, room)`, `formatDailySummary(bookings, room)` — taking the data they render as
+parameters instead of reaching into `this.rooms` and `this.storage`. `ReservationManager` keeps the
+lifecycle only: register, create, cancel, price, conflict detection. Presentation rules live in
+`receipts.ts`; `BookingError` stops interpolating a display clock and carries structured fields
+(`roomId`, `start`, `end`) so the caller decides how to render them; `dispatchNotification` gets a
+formatter passed in rather than calling back into the manager.
 
-**The decomposition.**
-
-**One cost.**
+**One cost.** This is not behavior-preserving, so it could not have been Milestone 2's fix. Changing
+`BookingError` to structured fields changes the message text, and `tests/booking.test.ts` asserts on
+`toThrow('already booked')` and the literal `Confirmed total: $234.00` — the refactor requires editing
+tests. It also costs callers ergonomics: the simplest use case now holds two things, a manager and a
+formatter, where one object used to answer both questions.
 
 ### The thing that looks smelly but is fine
 
-**What it is.** File and method.
+**What it is.** `validateReservationRequest` in `src/validation.ts:14-63` — one function, eleven
+sequential guard clauses, about fifty lines. It reads like a textbook Long Method.
 
-**Why it is fine.** Defend it with properties of the code, not with its line count.
+**Why it is fine.** It is a pure function of `(request, room)` with no state and no collaborators, so
+there is nothing to untangle. Every branch is flat — zero nesting, each one returns immediately — so
+the cyclomatic complexity is spread across independent checks rather than interacting paths. The
+ordering is the one real coupling and it is deliberate and documented: shape before times before
+duration before house rules, so the first failure reported is the most fundamental one, which is what
+lets `tests/validation.test.ts` assert exactly one reason per bad request. Every threshold is a named
+constant at the top, and the whole function has one reason to change: this building's booking rules.
+Splitting it into `validateTimes` / `validateCapacity` / `validateHouseRules` would add three names and
+force a policy for combining their results without removing a single decision.
 
-**What would flip your verdict.** Name the change that would turn this into a real problem.
+**What would flip your verdict.** A rule that varies by something other than the request — premium
+rooms opening later, a department granted a longer maximum duration, different hours on weekends. The
+first such rule turns the flat sequence into branching on room or tenant type, and then the shape
+should become a list of rule objects, `(request, room) => ValidationResult`, composed by a policy that
+can differ per room class. A caller that needs *every* failure rather than the first would flip it too,
+since returning on the first problem is baked into the current design.
