@@ -1,51 +1,78 @@
 # reservation-service: Smells and One Fix
 
-Fill in each section. One section per milestone. Keep it short and specific. Point at files
-and methods, not adjectives.
-
 ---
 
 ## Milestone 1: Three smells
 
-Three smells, each in a different part of the module. For each one, fill in all five parts.
+### Smell 1 — pricing rules implemented twice
 
-### Smell 1
+**The smell.** Duplicated code leading to shotgun surgery. All four pricing rules (hourly base,
+premium surcharge, >=3h discount, evening discount) and all five of their constants exist in two
+files, under different names.
 
-**The smell.** Name it, using the vocabulary from lecture.
+**Classic or agent-specific.** Agent-specific. The values and the order of operations are identical,
+but every constant was renamed (`PREMIUM_MULTIPLIER` -> `PREMIUM_RATE_MULTIPLIER`,
+`LONG_BOOKING_MINUTES` -> `LONG_BOOKING_CUTOFF`). The second file re-derived the rules from the spec
+instead of importing them — what you get when each file is written in its own pass with no
+cross-file reuse.
 
-**Classic or agent-specific.** Which, and why that label. For agent-specific, say which of
-the lecture's three causes produced it.
+**Where in the code.** `ReservationManager.calculatePrice` / `applyDiscounts`
+(`src/reservationManager.ts:11-15, 140-158`) vs `ReportGenerator.priceOf`
+(`src/reportGenerator.ts:4-8, 104-117`). `ReportGenerator.revenue` recomputes a price that the
+`Booking` already carries in `priceCents`.
 
-**Where in the code.** File and, where there is one, method.
+**The principle it violates.** Single source of truth: a pricing rule is one decision and belongs in
+one place. Secondarily, a report should read recorded facts, not re-derive them.
 
-**The principle it violates.** Name the principle. "This is too big" is not a principle.
+**What it makes expensive.** Already wrong today. `revenue` prices bookings from the room's *current*
+`hourlyRateCents`, so raising a rate rewrites history: I booked at $120.00, raised the rate, and the
+revenue report for that same booking read $180.00 while its receipt still said $120.00. The suite
+cannot catch it — `tests/reporting.test.ts:36` asserts revenue equals `priceCents` in a run where
+nothing changes, pinning the coincidence that the two copies agree rather than the rule itself.
 
-**What it makes expensive.** A concrete future change, or something that already goes wrong
-today. What breaks first?
+### Smell 2 — a cache with a read path and no write path
 
-### Smell 2
+**The smell.** Dead code and speculative generality: a whole caching layer wired in one direction.
 
-**The smell.**
+**Classic or agent-specific.** Agent-specific. The component and its call site were built in separate
+passes and the loop never closed, leaving plausible-looking infrastructure for a requirement nobody
+stated.
 
-**Classic or agent-specific.**
+**Where in the code.** `ReservationManager.listBookingsForRoom` (`src/reservationManager.ts:117-124`)
+calls `this.cache.get()`; `this.cache.set()` appears nowhere in `src/`. `QueryCache.set`,
+`invalidate`, `size` and `cacheConfig.withTtl` / `disabled` have no production caller.
 
-**Where in the code.**
+**The principle it violates.** YAGNI, and code should not lie: the method advertises a caching
+strategy that provably never caches, so every `get` misses and the key construction is pure overhead.
 
-**The principle it violates.**
+**What it makes expensive.** The obvious fix is a trap. Adding the missing `set()` ships a stale-read
+bug immediately, because nothing invalidates on `createBooking` or `cancelBooking`. First to break is
+`formatDailySummary`, which reads through `listBookingsForRoom` and would print a cancelled booking
+and a stale `Confirmed total`, while `findAvailableSlots` and `ReportGenerator.occupancy` read
+storage directly and would then disagree with it.
 
-**What it makes expensive.**
+### Smell 3 — presentation living inside the domain class
 
-### Smell 3
+**The smell.** Mixed levels of abstraction. Clock and currency formatting sit in the class that owns
+the booking lifecycle, and non-display code depends on them.
 
-**The smell.**
+**Classic or agent-specific.** Classic. This is the ordinary drift of a class that starts as the
+entry point and accretes whatever callers found convenient.
 
-**Classic or agent-specific.**
+**Where in the code.** `formatReceipt`, `formatDailySummary`, `formatClock`, `formatMoney` in
+`src/reservationManager.ts:176-228`; plus `createBooking` building its conflict message with
+`formatClock` (`src/reservationManager.ts:74`) and `dispatchNotification` sending `formatReceipt`
+output (`src/reservationManager.ts:216`).
 
-**Where in the code.**
+**The principle it violates.** Separation of concerns, argued by reasons to change: "how a receipt
+reads" and "when a booking is legal" are separate decisions, owned by different people and changing
+on different schedules. The problem is the coupling, not the size.
 
-**The principle it violates.**
-
-**What it makes expensive.**
+**What it makes expensive.** Moving to a 12-hour clock or a non-USD currency means editing the
+booking engine, and it silently rewrites two things that are not display: the text of `BookingError`
+and the body of every notification. First to break is `tests/booking.test.ts:128`, which asserts the
+literal `Confirmed total: $234.00` — a pure formatting change fails a test that is nominally about
+booking.
 
 ---
 
