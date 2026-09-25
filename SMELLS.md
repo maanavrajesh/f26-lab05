@@ -78,19 +78,32 @@ booking.
 
 ## Milestone 2: One small fix
 
-One fix, behavior preserved, suite green, zero test edits.
+**Which smell you attacked.** Smell 1, the duplicated pricing rules. It is the only one of the three
+that is producing wrong output today rather than just making a future change expensive, and the
+smallest honest fix is a deletion rather than a new abstraction.
 
-**Which smell you attacked.** And why that one.
+**What changed.** One file, `src/reportGenerator.ts`: deleted `priceOf`, `durationOf` and all five
+duplicated pricing constants, and `revenue` now reads `booking.priceCents` — the price the organizer
+was actually quoted and charged — instead of re-deriving it from the room's current rate. The pricing
+rules now exist in exactly one place, `ReservationManager.calculatePrice`. Net 4 insertions, 29
+deletions.
 
-**What changed.** Files and methods you touched, and what the code does differently now.
+**What you deliberately did not touch.** I did not extract a shared pricing module. The duplicate is
+gone because one copy had no business existing: a revenue report should read the recorded price, not
+recompute it. Extracting `pricing.ts` would have kept two callers of the rules alive and made the
+change bigger while fixing less. I also kept `revenue`'s existing guard that skips bookings whose
+room was not handed to the generator — swapping `find` for `some` preserves that filter exactly,
+because removing it would have changed which bookings count, and that is a behavior change no test
+pins down. Pricing living inside `ReservationManager` is Smell 3's territory and stays for Milestone 3.
 
-**What you deliberately did not touch.** Name the scope line you drew and why you drew it
-there. "I ran out of time" is not a scope line.
-
-**How you know behavior is preserved.** Point at the suite, say what it actually covers, and
-say what it would not catch.
-
----
+**How you know behavior is preserved.** All 39 tests pass and `npm run typecheck` exits 0, with no
+test file edited. The suite covers this fix well: `tests/reporting.test.ts` asserts `totalCents`,
+`averageCents` (11700) and `byRoom` (`{ r1: 23400 }`) across a normal and an evening booking, and
+checks that cancellations drop out — so any arithmetic drift would fail. What it would not catch is
+the divergence itself, since it only ever compares the two implementations in a run where nothing
+changes. I verified that separately in a scratch test: before the fix, a booking charged $120.00
+appeared in the revenue report as $180.00 once the room rate was raised; after the fix both read
+$120.00.
 
 ## Milestone 3: Two proposals and one false positive
 
